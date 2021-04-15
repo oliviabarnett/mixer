@@ -76,13 +76,3 @@ func main() {
 		client.Do(req)
 	}
 }
-
-// 1. Input transaction: [addresses] and amount
-// 2. "Register" transaction and send back deposit address and key
-// 3. Scan for new transactions. Check every ~ five min or something? Check for transactions.
-//    When we get a transaction that is in our "registered" list, pop it out of registered list and process it
-// 4. Process transaction --> call separate transacts
-
-// class able to hit their endpoints
-
-// Two entry boxes for input data
