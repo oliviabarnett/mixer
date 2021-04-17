@@ -7,6 +7,7 @@ import (
 	"github.com/gorilla/mux"
 	jobcoin "github.com/oliviabarnett/mixer"
 	"github.com/oliviabarnett/mixer/clientlib"
+	"github.com/oliviabarnett/mixer/internal"
 	"io"
 	"log"
 	"math/rand"
@@ -15,61 +16,29 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
-
-// https://stackoverflow.com/questions/57646760/communicating-multiple-containers-running-golang
 
 // Could this be an LRU cache?
 // When a transaction is registered, that means we are actively searching for it.
 // Deposit address --> list of addresses
 
-type RegisteredTransactions struct {
-	sync.RWMutex
-	internal map[string][]string
-}
 
-func NewRegisteredTransactions() *RegisteredTransactions {
-	return &RegisteredTransactions{
-		internal: make(map[string][]string),
-	}
+type MixerConfig struct {
+	registeredTransactions *internal.RegisteredTransactions
+	houseAddress string
+	api clientlib.API
+	dispatcher *internal.Dispatcher
+	collectedFees float64
 }
-
-func (rm *RegisteredTransactions) Load(key string) (value []string, ok bool) {
-	rm.RLock()
-	result, ok := rm.internal[key]
-	rm.RUnlock()
-	return result, ok
-}
-
-func (rm *RegisteredTransactions) Delete(key string) {
-	rm.Lock()
-	delete(rm.internal, key)
-	rm.Unlock()
-}
-
-func (rm *RegisteredTransactions) Store(key string, value []string) {
-	rm.Lock()
-	rm.internal[key] = value
-	rm.Unlock()
-}
-
-// TODO: how to handle these global variables and make them testable
-// ENV variables on docker would be nice I think...
-var registeredTransactions *RegisteredTransactions
-var houseAddress string
-var api clientlib.API
-var dispatcher *Dispatcher
-var collectedFees float64
 
 func ServeMixer() {
-
-	setUpMixerService()
+	mixerConfig := initializeMixer()
+	rand.Seed(time.Now().UnixNano())
 
 	r := mux.NewRouter()
-	r.HandleFunc("/send", sendHandler)
+	r.HandleFunc("/send", mixerConfig.sendHandler)
 	http.Handle("/", r)
 
 	srv := &http.Server{
@@ -86,73 +55,88 @@ func ServeMixer() {
 		}
 	}()
 
-	dispatcher.Start(10)
+	// Start job dispatcher which will send out transactions
+	mixerConfig.dispatcher.Start(10)
 
 	waitForShutdown(srv)
-	fmt.Println("Fee Collection Total: ", collectedFees)
-	dispatcher.Finished()
+	fmt.Printf("Fee Collection Total: %f \n", mixerConfig.collectedFees)
+	mixerConfig.dispatcher.Finished()
 }
 
-func setUpMixerService() {
-	// On each mixer boot, create a new house address and a new API client for requests to JobCoin
-	houseAddress = "House address" // uuid.NewString() // TODO: make UUID when done testing
-	registeredTransactions = NewRegisteredTransactions()
-	dispatcher = NewDispatcher()
-	collectedFees = 0
-	api = clientlib.API{Client: http.DefaultClient}
-	rand.Seed(time.Now().UnixNano())
+func initializeMixer() *MixerConfig {
+	return &MixerConfig{
+		houseAddress:           "House address", // uuid.NewString() // TODO: make UUID when done testing
+		registeredTransactions: internal.NewRegisteredTransactions(),
+		dispatcher:             internal.NewDispatcher(),
+		collectedFees:          0,
+		api:                   	&clientlib.JobCoinAPI{Client: http.DefaultClient},
+	}
 }
 
-// PollAddress Watch the address that the user promised to send JobCoin to for a certain amount time.
+// PollAddress watches the address that the user promised to send JobCoin to for a certain amount time.
 // If JobCoin hasn't been sent in that window, abandon the job.
-func PollAddress(address string) {
+func (mixerConfig *MixerConfig) pollAddress(address string) {
+	startTime := time.Now()
 	ticker := time.NewTicker(time.Second * 5)
+
+	// Each address being polled will have its own set of "processedTransactions" to ensure we don't repeat send
+	processedTransactions := internal.NewSet()
 
 	defer ticker.Stop()
 	done := make(chan bool)
 	go func() {
-		time.Sleep(600 * time.Second)
+		//  If a transaction has not been detected after a set amount of time, abandon scanning this deposit address.
+		time.Sleep(jobcoin.TransactionWindow * time.Second)
 		done <- true
 	}()
 	for {
 		select {
 		case <-done:
+			// When abandoning the deposit address delete it from the set of registeredTransactions.
+			mixerConfig.registeredTransactions.Delete(address)
 			return
 		case <-ticker.C:
-			// TODO: what about OLD transactions? Can I use the time data here?
-			addressInfo, _ := api.GetAddressInfo(address)
-			// In the case that we identify a new transaction to the deposit address
-			// process this transaction
-			if len(addressInfo.Transactions) > 0 && ProcessTransactions(address, addressInfo.Balance) {
-				return
+			addressInfo, err := mixerConfig.api.GetAddressInfo(address)
+			if err != nil {
+				continue
 			}
+			mixerConfig.processTransactions(addressInfo.Transactions, processedTransactions, startTime)
 		}
 	}
 }
 
-// ProcessTransactions determines whether the given transaction is waiting for mixing. If it is, the transaction
-// is removed from the table of registeredTransactions and the entire balance is deposited in the house address.
-func ProcessTransactions(address string, amount string) bool {
-	// Check that we have this address registered (ie awaiting mixing to destinationAddresses)
-	destinationAddresses, ok := registeredTransactions.Load(address)
-	if !ok { return false }
+// ProcessTransactions identifies transactions that need processing and moves the transaction amount from the
+// deposit address to the house address then kicks off mixing to the destination addresses
+func (mixerConfig *MixerConfig) processTransactions(transactions []internal.Transaction, processedTransactions *internal.Set, startTime time.Time) {
+	for _, transaction := range transactions {
+		fmt.Printf("processing: %v \n", transaction)
+		if processedTransactions.Contains(transaction.AsSha256()) || transaction.Timestamp.Before(startTime) {
+			continue
+		}
+		destinationAddresses, ok := mixerConfig.registeredTransactions.Load(transaction.ToAddress)
+		if !ok {
+			continue
+		}
 
-	// Move amount from deposit address to house address
-	_, err := api.SendCoin(address, houseAddress, amount)
-	if err != nil {
-		return false
+		transactionStartTime := time.Now()
+
+		// If the transaction is new, has been posted after we started listening, and is to an active deposit address
+		// then we will proceed with processing it. First step is to send the amount to the house address.
+		_, err := mixerConfig.api.SendCoin(transaction.FromAddress, mixerConfig.houseAddress, transaction.Amount)
+
+		// If sending to the house address fails, another polling pass will attempt to send again.
+		if err != nil {
+			continue
+		}
+
+		// Mix this money and dole it out to destinationAddresses
+		mixerConfig.mixToAddresses(destinationAddresses, transaction.Amount, transactionStartTime)
+
+		processedTransactions.Add(transaction.AsSha256())
 	}
-
-	// With current implementation, will need to re-hit the mixer with intention to distribute coins to addresses
-	// TODO: check if we need to be able to continually send to this address
-	registeredTransactions.Delete(address)
-
-	// Mix this money and dole it out to destinationAddresses
-	mixToAddresses(destinationAddresses, amount)
-	return true
 }
 
-func DistributeAmount(destinationAddresses []string, amount string) (float64, []float64, error) {
+func distributeAmount(destinationAddresses []string, amount string) (float64, []float64, error) {
 	// TODO: better random generated. Right now, biggest number first always likely
 	var amounts = make([]float64, len(destinationAddresses))
 	balance, err := strconv.ParseFloat(amount, 64)
@@ -171,13 +155,11 @@ func DistributeAmount(destinationAddresses []string, amount string) (float64, []
 	return fee, amounts, err
 }
 
-func mixToAddresses(destinationAddresses []string, amount string) {
-	//fmt.Println("Mixing %s to %v \n", amount, destinationAddresses)
+func (mixerConfig *MixerConfig) mixToAddresses(destinationAddresses []string, amount string, startTime time.Time) {
+	fmt.Printf("Transaction start time: %v \n", startTime)
+	feeCollected, amounts, err := distributeAmount(destinationAddresses, amount)
+	mixerConfig.collectedFees += feeCollected
 
-	feeCollected, amounts, err := DistributeAmount(destinationAddresses, amount)
-	collectedFees += feeCollected
-
-	//fmt.Println("Amounts in transactions: %s \n", amounts)
 	if err != nil || len(amounts) != len(destinationAddresses) {
 		return
 	}
@@ -186,17 +168,21 @@ func mixToAddresses(destinationAddresses []string, amount string) {
 	// Or should there be one job per deposit address
 	// Randomly split up the amount across the addresses
 	for i, address := range destinationAddresses {
-		job := func() error {
-			fmt.Println("about to access api")
-			_, err := api.SendCoin(houseAddress, address, fmt.Sprintf("%f", amounts[i]))
-			return err
-		}
-
-		dispatcher.AddJob(job)
+		go func(destinationAddress string, amountToSend float64) {
+			fmt.Printf("Create job for %s \n", destinationAddress)
+			job := func() error {
+				sendingAmount := fmt.Sprintf("%f", amountToSend)
+				fmt.Printf("Sending %s to %s \n", sendingAmount, destinationAddress)
+				_, err := mixerConfig.api.SendCoin(mixerConfig.houseAddress, destinationAddress, sendingAmount)
+				return err
+			}
+			mixerConfig.dispatcher.AddJob(job, time.Now())
+		}(address, amounts[i])
 	}
 }
 
-func sendHandler(w http.ResponseWriter, r *http.Request) {
+// sendHandler awaits input from th
+func (mixerConfig *MixerConfig) sendHandler(w http.ResponseWriter, r *http.Request) {
 	var receivedData map[string]string
 	decoder := json.NewDecoder(r.Body)
 
@@ -221,14 +207,13 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	// Save new transactions
 	// What if you want to send to A and B but we already have those registered...
 	// Hashmap won't work in this case. Another reason to use LRU cache?
-	_, ok = registeredTransactions.Load(depositAddress)
+	_, ok = mixerConfig.registeredTransactions.Load(depositAddress)
 	if !ok {
 		// TODO: Perhaps registered transactions should have an expiration on them
-		registeredTransactions.Store(depositAddress, strings.Split(strings.ToLower(addresses), ","))
+		mixerConfig.registeredTransactions.Store(depositAddress, strings.Split(strings.ToLower(addresses), ","))
 
-		// Watch this new address for a duration of time for deposits.
 		go func() {
-			PollAddress(depositAddress)
+			mixerConfig.pollAddress(depositAddress)
 		}()
 	}
 
@@ -245,7 +230,7 @@ func waitForShutdown(srv *http.Server) {
 	defer cancel()
 	srv.Shutdown(ctx)
 
-	log.Println("Shutting down mixer...")
+	log.Printf("\n Shutting down mixer... \n")
 	os.Exit(0)
 }
 
@@ -259,111 +244,4 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(response)
-}
-
-/// SCHEDULER
-
-type Job struct {
-	ID int
-	F func() error
-	time time.Duration
-}
-
-type DispatchStatus struct {
-	Type string
-	ID int
-	Status string
-}
-
-type Dispatcher struct {
-	jobCounter int
-	jobQueue chan *Job
-	dispatchStatus chan *DispatchStatus
-	workQueue chan *Job
-	workerQueue chan *Worker
-}
-
-type Worker struct {
-	ID int
-	jobs chan *Job
-	dispatchStatus chan *DispatchStatus
-	Quit chan bool
-}
-
-type JobExecutable func() error
-
-func CreateNewWorker(id int, workerQueue chan *Worker, jobQueue chan *Job, dStatus chan *DispatchStatus) *Worker {
-	w := &Worker{
-		ID: id,
-		jobs: jobQueue,
-		dispatchStatus: dStatus,
-	}
-
-	go func() { workerQueue <- w }()
-	return w
-}
-
-func (w *Worker) Start() {
-	go func() {
-		for {
-			select {
-			case job := <- w.jobs:
-				fmt.Printf("Worker[%d] executing job[%d].\n", w.ID, job.ID)
-				job.F()
-				w.dispatchStatus <- &DispatchStatus{Type: "worker", ID: w.ID, Status: "quit"}
-				w.Quit <- true
-			case <- w.Quit:
-				return
-			}
-		}
-	}()
-}
-
-func NewDispatcher() *Dispatcher {
-	d := &Dispatcher{
-		jobCounter: 0,
-		jobQueue: make(chan *Job),
-		dispatchStatus: make(chan *DispatchStatus),
-		workQueue: make(chan *Job),
-		workerQueue: make(chan *Worker),
-	}
-	return d
-}
-
-// Start executes job after a certain amount of time
-// Should the job only be dispatched after a certain amount of time? Or immediately & then sleep for duration?
-func (d *Dispatcher) Start(numWorkers int) {
-	for i := 0; i<numWorkers; i++ {
-		worker := CreateNewWorker(i, d.workerQueue, d.workQueue, d.dispatchStatus)
-		worker.Start()
-	}
-
-	go func() {
-		for {
-			select {
-			case job := <- d.jobQueue:
-				fmt.Printf("Got a job in the queue to dispatch: %d\n", job.ID)
-				d.workQueue <- job
-			case ds := <- d.dispatchStatus:
-				fmt.Printf("Got a dispatch status:\n\tType[%s] - ID[%d] - Status[%s]\n", ds.Type, ds.ID, ds.Status)
-				if ds.Type == "worker" {
-					if ds.Status == "quit" {
-						d.jobCounter--
-					}
-				}
-			}
-		}
-	}()
-}
-
-func (d *Dispatcher) AddJob(je JobExecutable) {
-	j := &Job{ID: d.jobCounter, F: je}
-	go func() { d.jobQueue <- j }()
-	d.jobCounter++
-	fmt.Printf("jobCounter is now: %d\n", d.jobCounter)
-}
-
-func (d *Dispatcher) Finished() bool {
-	fmt.Printf("Finished Dispatcher \n")
-	return d.jobCounter < 1
 }

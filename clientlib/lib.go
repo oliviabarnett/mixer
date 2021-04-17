@@ -4,35 +4,34 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/oliviabarnett/mixer"
+	"github.com/oliviabarnett/mixer/internal"
 	"net/http"
 )
 
-type Transaction struct {
-	Timestamp string
-	ToAddress string
-	FromAddress string
-	Amount string
+type API interface {
+	GetTransactions() ([]internal.Transaction, error)
+	GetAddressInfo(address string) (internal.AddressInfo, error)
+	SendCoin(fromAddress string, toAddress string, amount string) (string, error)
 }
 
-type AddressInfo struct {
-	Balance string
-	Transactions []Transaction
-}
-
-type API struct {
+type JobCoinAPI struct {
 	Client  *http.Client
 }
 
 /// Get the list of all JobCoin transactions
-func (api*API)GetTransactions() ([]Transaction, error) {
-	response, err := api.Client.Get(jobcoin.TransactionEndpoint)
+func (api JobCoinAPI)GetTransactions() ([]internal.Transaction, error) {
+	return getTransactions(api.Client)
+}
+
+func getTransactions(client *http.Client) ([]internal.Transaction, error) {
+	response, err := client.Get(jobcoin.TransactionEndpoint)
 	if err != nil {
 		panic(err)
 	}
 
 	defer response.Body.Close()
 
-	var transactions []Transaction
+	var transactions []internal.Transaction
 	decoder := json.NewDecoder(response.Body)
 
 	err = decoder.Decode(&transactions)
@@ -41,8 +40,12 @@ func (api*API)GetTransactions() ([]Transaction, error) {
 }
 
 /// Get the balance and list of transactions for an address.
-func (api*API)GetAddressInfo(address string) (AddressInfo, error) {
-	response, err := api.Client.Get(jobcoin.AddressesEndpoint + "/" + address)
+func (api JobCoinAPI)GetAddressInfo(address string) (internal.AddressInfo, error) {
+	return getAddressInfo(api.Client, address)
+}
+
+func getAddressInfo(client *http.Client, address string) (internal.AddressInfo, error) {
+	response, err := client.Get(jobcoin.AddressesEndpoint + "/" + address)
 
 	if err != nil {
 		panic(err)
@@ -50,7 +53,7 @@ func (api*API)GetAddressInfo(address string) (AddressInfo, error) {
 
 	defer response.Body.Close()
 
-	var addressInfo AddressInfo
+	var addressInfo internal.AddressInfo
 	decoder := json.NewDecoder(response.Body)
 
 	err = decoder.Decode(&addressInfo)
@@ -58,10 +61,14 @@ func (api*API)GetAddressInfo(address string) (AddressInfo, error) {
 }
 
 /// Send a specified amount of JobCoin from one address to another
-func (api*API)SendCoin(fromAddress string, toAddress string, amount string) (string, error) {
+func (api JobCoinAPI)SendCoin(fromAddress string, toAddress string, amount string) (string, error) {
+	return sendCoin(api.Client, fromAddress, toAddress, amount)
+}
+
+func sendCoin(client *http.Client, fromAddress string, toAddress string, amount string) (string, error) {
 	values := map[string]string{"fromAddress": fromAddress, "toAddress": toAddress, "amount": amount}
 	jsonValue, _ := json.Marshal(values)
-	response, err := api.Client.Post(jobcoin.TransactionEndpoint, "application/json", bytes.NewBuffer(jsonValue))
+	response, err := client.Post(jobcoin.TransactionEndpoint, "application/json", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		panic(err)
 	}
