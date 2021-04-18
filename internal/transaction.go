@@ -17,6 +17,7 @@ type Transaction struct {
 // This is probably NOT performant... not sure how this kind of thing is normally handled in Go
 func (transaction Transaction)AsSha256() string {
 	h := sha256.New()
+	transaction.Timestamp = transaction.Timestamp.Round(0)
 	h.Write([]byte(fmt.Sprintf("%v", transaction)))
 
 	return fmt.Sprintf("%x", h.Sum(nil))

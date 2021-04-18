@@ -39,15 +39,13 @@ where your mixed Jobcoins will be sent. Example:
 	fmt.Println(instruction)
 }
 
-
-
 func main() {
 	// Spin up the Mixer service
 	go func() {
 		mixerlib.ServeMixer()
 	}()
 
-	// Handle user input. This _could_ be another service
+	// Handle user input. This _could_ be another service but for now just console input.
 	input := bufio.NewScanner(os.Stdin)
 	welcomeInstructions()
 	for input.Scan() {

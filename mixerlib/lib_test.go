@@ -128,9 +128,11 @@ func TestMixToAddresses(t *testing.T) {
 }
 
 func TestDistributeAmount(t *testing.T) {
-	destinationAddresses := []string{"A", "B", "C"}
+	destinationAddresses := []string{"A", "B"}
 	amount := fmt.Sprintf("%f", 10.0)
-	feeCollected, amounts, err := distributeAmount(destinationAddresses, amount)
+	startTime := time.Now()
+	maxTime := time.Unix(startTime.Unix() + jobcoin.DepositInterval, 0)
+	feeCollected, amounts, times, err := distribute(destinationAddresses, amount, startTime.Unix())
 
 	var sum float64 = 0
 	for _, amount := range amounts {
@@ -140,6 +142,17 @@ func TestDistributeAmount(t *testing.T) {
 	if fmt.Sprintf("%f", sum) != amount || err != nil {
 		t.Errorf("Distributing amount over addresses. Sums to %f, want: %s.", sum, amount)
 	}
+
+	for _, scheduledTime := range times {
+		if scheduledTime.After(maxTime) {
+			t.Errorf("Scheduled to send after max allotted time. Scheduled at %s, want before: %s.", scheduledTime.String(), maxTime.String())
+		}
+		if scheduledTime.Before(startTime) {
+			t.Errorf("Scheduled to send after before start time. Scheduled at %s, want after: %s.", scheduledTime.String(), startTime.String())
+		}
+	}
+
+	fmt.Printf("amounts %v \n", amounts)
 }
 
 func TestProcessTransactions(t *testing.T) {

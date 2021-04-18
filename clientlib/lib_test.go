@@ -46,7 +46,6 @@ func TestGetAddressInfo(t *testing.T) {
 		}
 
 		jsonValue, _ := json.Marshal(addressInfo)
-
 		return &http.Response{
 			StatusCode: 200,
 			Body:       ioutil.NopCloser(bytes.NewBuffer(jsonValue)),
@@ -63,7 +62,8 @@ func TestGetAddressInfo(t *testing.T) {
 	if len(addressInfo.Transactions) != 1 {
 		t.Errorf("GetAddressInfo sent %d transactions but should have sent 1", len(addressInfo.Transactions))
 	}
-	if addressInfo.Transactions[0] != receivedAddressInfo.Transactions[0] {
+
+	if addressInfo.Transactions[0].AsSha256() != receivedAddressInfo.Transactions[0].AsSha256() {
 		t.Errorf("GetAddressInfo sent transaction %v, but should have sent: %v.", addressInfo.Transactions[0], receivedAddressInfo.Transactions[0])
 	}
 }
@@ -144,7 +144,7 @@ func TestGetTransactions(t *testing.T) {
 	if len(receivedTransactions) != 2 {
 		t.Errorf("GetTransactions sent %d transactions but should have sent 2", len(receivedTransactions))
 	}
-	if receivedTransactions[0] != transactions[0] || receivedTransactions[1] != transactions[1] {
+	if receivedTransactions[0].AsSha256() != transactions[0].AsSha256() || receivedTransactions[1].AsSha256() != transactions[1].AsSha256() {
 		t.Errorf("GetAddressInfo sent transactions %v, but should have sent: %v.", receivedTransactions, transactions)
 	}
 }

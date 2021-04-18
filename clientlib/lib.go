@@ -3,8 +3,10 @@ package clientlib
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/oliviabarnett/mixer"
 	"github.com/oliviabarnett/mixer/internal"
+	"io"
 	"net/http"
 )
 
@@ -18,7 +20,7 @@ type JobCoinAPI struct {
 	Client  *http.Client
 }
 
-/// Get the list of all JobCoin transactions
+// GetTransactions gets the list of all JobCoin transactions
 func (api JobCoinAPI)GetTransactions() ([]internal.Transaction, error) {
 	return getTransactions(api.Client)
 }
@@ -28,39 +30,41 @@ func getTransactions(client *http.Client) ([]internal.Transaction, error) {
 	if err != nil {
 		panic(err)
 	}
-
-	defer response.Body.Close()
-
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Failed to successfully close reader in getTransactions")
+		}
+	}(response.Body)
 	var transactions []internal.Transaction
 	decoder := json.NewDecoder(response.Body)
-
 	err = decoder.Decode(&transactions)
-
 	return transactions, err
 }
 
-/// Get the balance and list of transactions for an address.
+// GetAddressInfo gets the balance and list of transactions for an address.
 func (api JobCoinAPI)GetAddressInfo(address string) (internal.AddressInfo, error) {
 	return getAddressInfo(api.Client, address)
 }
 
 func getAddressInfo(client *http.Client, address string) (internal.AddressInfo, error) {
 	response, err := client.Get(jobcoin.AddressesEndpoint + "/" + address)
-
 	if err != nil {
 		panic(err)
 	}
-
-	defer response.Body.Close()
-
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Failed to successfully close reader in getAddressInfo")
+		}
+	}(response.Body)
 	var addressInfo internal.AddressInfo
 	decoder := json.NewDecoder(response.Body)
-
 	err = decoder.Decode(&addressInfo)
 	return addressInfo, err
 }
 
-/// Send a specified amount of JobCoin from one address to another
+// SendCoin posts a specified amount of JobCoin from one address to another
 func (api JobCoinAPI)SendCoin(fromAddress string, toAddress string, amount string) (string, error) {
 	return sendCoin(api.Client, fromAddress, toAddress, amount)
 }
@@ -72,6 +76,5 @@ func sendCoin(client *http.Client, fromAddress string, toAddress string, amount 
 	if err != nil {
 		panic(err)
 	}
-
 	return response.Status, err
 }
