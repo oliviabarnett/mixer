@@ -1,4 +1,4 @@
-package mixerlib
+package main
 
 import (
 	"bytes"

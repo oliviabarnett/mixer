@@ -1,4 +1,4 @@
-package mixerlib
+package main
 
 import (
 	"context"
@@ -33,7 +33,7 @@ type MixerConfig struct {
 
 // ServeMixer spins up an endpoint to which mixing requests are sent. Also creates the dispatcher which
 // will handle adding and executing mixing jobs.
-func ServeMixer() {
+func main() {
 	mixerConfig := initializeMixer()
 	rand.Seed(time.Now().UnixNano())
 
