@@ -10,12 +10,14 @@ import (
 	"net/http"
 )
 
+// API exposes the different functions used to interact with the JobCoin API
 type API interface {
 	GetTransactions() ([]internal.Transaction, error)
 	GetAddressInfo(address string) (internal.AddressInfo, error)
 	SendCoin(fromAddress string, toAddress string, amount string) (string, error)
 }
 
+// JobCoinAPI specifies the method of contact with the API
 type JobCoinAPI struct {
 	Client  *http.Client
 }

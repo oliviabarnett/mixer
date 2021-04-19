@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -35,7 +34,6 @@ func TestDispatcher_AddJob(t *testing.T) {
 	var createdJobs []*Job
 	for i := range jobQueue {
 		createdJobs = append(createdJobs, i)
-		fmt.Println("Created a job")
 		if len(createdJobs) > 0 {
 			break
 		}

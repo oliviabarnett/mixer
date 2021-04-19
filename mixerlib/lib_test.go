@@ -2,11 +2,11 @@ package mixerlib
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"github.com/oliviabarnett/mixer"
 	"github.com/oliviabarnett/mixer/internal"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"testing"
 	"time"
@@ -37,28 +37,21 @@ func NewMockDispatcher(jobQueue chan *internal.Job, dispatchStatus chan *interna
 
 type MockAPI struct {
 	Client  *http.Client
-	addressesToFill *[]string
 }
 
 func (api MockAPI)GetTransactions() ([]internal.Transaction, error) {
-	log.Println("GETTRANSACTIONS")
 	transactions := []internal.Transaction{}
 	return transactions, nil
 }
 
 /// Get the balance and list of transactions for an address.
-func (api MockAPI)GetAddressInfo(address string) (internal.AddressInfo, error) {
-	log.Println("GETADDRESSINFO: address: ", address)
+func (api MockAPI)GetAddressInfo(_ string) (internal.AddressInfo, error) {
 	addressInfo := internal.AddressInfo{}
 	return addressInfo, nil
 }
 
 /// Send a specified amount of JobCoin from one address to another
-func (api MockAPI)SendCoin(fromAddress string, toAddress string, amount string) (string, error) {
-	log.Println("SENDCOIN: fromAddress: ", fromAddress)
-	log.Println(" toAddress: ", toAddress)
-	log.Println("amount: ", amount)
-	*api.addressesToFill = append(*api.addressesToFill, amount)
+func (api MockAPI)SendCoin(_ string, _ string, _ string) (string, error) {
 	return "200", nil
 }
 
@@ -67,24 +60,36 @@ func NewMockMixerConfig(client *http.Client,
 						jobQueue chan *internal.Job,
 						dispatchStatus chan *internal.DispatchStatus,
 						workQueue chan *internal.Job,
-						workerQueue chan *internal.Worker,
-						addressesToFill *[]string) *MixerConfig {
+						workerQueue chan *internal.Worker) *MixerConfig {
 	return &MixerConfig{
 		houseAddress:           "House address",
 		registeredTransactions: registeredTransactions,
 		dispatcher:             NewMockDispatcher(jobQueue, dispatchStatus, workQueue, workerQueue),
 		collectedFees:          0,
-		api:                    &MockAPI{client, addressesToFill},
+		api:                    &MockAPI{client},
 	}
 }
 
 func TestMixToAddresses(t *testing.T) {
+	amount := "50"
+	toAddresses := []string{"alpha", "bravo", "charlie"}
+
 	client := NewMockClient(func(req *http.Request) *http.Response {
 		if req.URL.String() != jobcoin.TransactionEndpoint {
 			t.Errorf("MixToAddresses hits endpoint %s, want: %s.", req.URL.String(), jobcoin.TransactionEndpoint)
 		}
 
-		fmt.Println("HIT CLIENT")
+		var sentInfo map[string]string
+		decoder := json.NewDecoder(req.Body)
+
+		err := decoder.Decode(&sentInfo)
+		if err != nil {
+			t.Errorf("MixToAddresses fails to decode sent data with error %s", err)
+		}
+		if !contains(toAddresses, sentInfo["toAddress"]) {
+			t.Errorf("MixToAddresses sending to an address not specified %s.", sentInfo["toAddress"])
+		}
+
 		return &http.Response{
 			StatusCode: 200,
 			Body:       ioutil.NopCloser(bytes.NewBufferString(`OK`)),
@@ -92,16 +97,14 @@ func TestMixToAddresses(t *testing.T) {
 		}
 	})
 
-	addressesToFill := make([]string, 0, 5)
-
 	var jobQueue = make(chan *internal.Job)
 	var dispatchStatus = make(chan *internal.DispatchStatus)
 	var workQueue = make(chan *internal.Job)
 	var workerQueue = make(chan *internal.Worker)
 	registeredTransactions := internal.NewRegisteredTransactions()
 
-	mixerConfig := NewMockMixerConfig(client, registeredTransactions, jobQueue, dispatchStatus, workQueue, workerQueue, &addressesToFill)
-	mixerConfig.mixToAddresses([]string{"alpha", "bravo", "charlie"}, "50", time.Now())
+	mixerConfig := NewMockMixerConfig(client, registeredTransactions, jobQueue, dispatchStatus, workQueue, workerQueue)
+	mixerConfig.mixToAddresses(toAddresses, amount, time.Now())
 
 	if mixerConfig.collectedFees == 0 {
 		t.Errorf("MixToAddresses not collecting a fee")
@@ -115,15 +118,10 @@ func TestMixToAddresses(t *testing.T) {
 			break
 		}
 	}
+	fmt.Printf("read job queue \n")
 
 	if len(scheduledJobs) != 3 {
 		t.Errorf("MixToAddresss fails to schedule 3 jobs, instead schedules %d", len(scheduledJobs))
-	}
-
-	mixerConfig.dispatcher.Start(3)
-
-	if len(addressesToFill) == 0 {
-		t.Errorf("MixToAddresses fails to distribute %v, ", addressesToFill)
 	}
 }
 
@@ -151,8 +149,6 @@ func TestDistributeAmount(t *testing.T) {
 			t.Errorf("Scheduled to send after before start time. Scheduled at %s, want after: %s.", scheduledTime.String(), startTime.String())
 		}
 	}
-
-	fmt.Printf("amounts %v \n", amounts)
 }
 
 func TestProcessTransactions(t *testing.T) {
@@ -188,7 +184,6 @@ func TestProcessTransactions(t *testing.T) {
 	}
 
 	transactions := []internal.Transaction{targetTransaction, notTargetDepositAddressTransaction, tooOldTransaction}
-	addressesToFill := make([]string, 0, 5)
 
 	var jobQueue = make(chan *internal.Job)
 	var dispatchStatus = make(chan *internal.DispatchStatus)
@@ -198,7 +193,7 @@ func TestProcessTransactions(t *testing.T) {
 
 	registeredTransactions.Store("depositAddress", []string{"a", "b"})
 
-	mixerConfig := NewMockMixerConfig(client, registeredTransactions, jobQueue, dispatchStatus, workQueue, workerQueue, &addressesToFill)
+	mixerConfig := NewMockMixerConfig(client, registeredTransactions, jobQueue, dispatchStatus, workQueue, workerQueue)
 
 	processedTransactions := internal.NewSet()
 	startTime := time.Date(2000, time.Month(2), 21, 1, 10, 30, 0, time.UTC)
@@ -213,4 +208,13 @@ func TestProcessTransactions(t *testing.T) {
 	if processedTransactions.Contains(tooOldTransaction.AsSha256()) {
 		t.Errorf("Processed a transaction that was sent before we started scanning. Should not have processed:  %v", tooOldTransaction)
 	}
+}
+
+func contains(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
 }

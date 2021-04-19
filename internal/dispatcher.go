@@ -95,14 +95,13 @@ func (d *Dispatcher) Start(numWorkers int) {
 	}()
 }
 
+// scanJobs moves jobs from the jobQueue to the work queue and keeps track of the number of active jobs
 func (d *Dispatcher)scanJobs() {
 	for {
 		select {
 		case job := <- d.JobQueue:
-			fmt.Printf("Got a job in the queue to dispatch: %s\n", job.ID)
 			go func() { d.WorkQueue <- job }()
 		case ds := <- d.DispatchStatus:
-			fmt.Printf("Got a dispatch status:\n\tType[%s] - ID[%d] - Status[%s]\n", ds.Type, ds.ID, ds.Status)
 			if ds.Type == "worker" {
 				if ds.Status == "quit" {
 					d.JobCounter--
@@ -143,8 +142,4 @@ func (d *Dispatcher) AddJob(id string, je JobExecutable, executionTime time.Time
 			}
 		}
 	}()
-}
-
-func (d *Dispatcher) Finished() bool {
-	return d.JobCounter < 1
 }

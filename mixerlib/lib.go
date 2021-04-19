@@ -32,7 +32,7 @@ type MixerConfig struct {
 }
 
 // ServeMixer spins up an endpoint to which mixing requests are sent. Also creates the dispatcher which
-// will handle adding and executing mixing jobs.
+// will handle adding and executing mixing jobs. This would be the main function when containerized
 func ServeMixer() {
 	mixerConfig := initializeMixer()
 	rand.Seed(time.Now().UnixNano())
@@ -59,8 +59,7 @@ func ServeMixer() {
 	mixerConfig.dispatcher.Start(10)
 
 	waitForShutdown(srv)
-	fmt.Printf("Fee Collection Total: %f \n", mixerConfig.collectedFees)
-	mixerConfig.dispatcher.Finished()
+
 }
 
 // initializeMixer sets up the config required to run a mixing service
@@ -97,6 +96,7 @@ func (mixerConfig *MixerConfig) pollAddress(address string) {
 			mixerConfig.registeredTransactions.Delete(address)
 			return
 		case <-ticker.C:
+			// On tick, take a look at the transactions posted to the deposit address
 			addressInfo, err := mixerConfig.api.GetAddressInfo(address)
 			if err != nil {
 				continue
@@ -110,14 +110,15 @@ func (mixerConfig *MixerConfig) pollAddress(address string) {
 // deposit address to the house address then kicks off mixing to the destination addresses
 func (mixerConfig *MixerConfig) processTransactions(transactions []internal.Transaction, processedTransactions *internal.Set, startTime time.Time) {
 	for _, transaction := range transactions {
+		// Do not mix transactions that are old or have been processed
 		if processedTransactions.Contains(transaction.AsSha256()) || transaction.Timestamp.Before(startTime) {
 			continue
 		}
+		// Ensure that we have registered the deposit address of the transaction we are attempting to process
 		destinationAddresses, ok := mixerConfig.registeredTransactions.Load(transaction.ToAddress)
 		if !ok {
 			continue
 		}
-		fmt.Printf("processing: %v \n", transaction)
 
 		// Record the time at which the transaction was recorded so we know when to execute the transaction
 		transactionStartTime := time.Now()
@@ -134,7 +135,7 @@ func (mixerConfig *MixerConfig) processTransactions(transactions []internal.Tran
 		// Mix this amount and dole it out to destinationAddresses
 		mixed := mixerConfig.mixToAddresses(destinationAddresses, transaction.Amount, transactionStartTime)
 
-		// Record that we processed the transaction
+		// Record that we processed the transaction to avoid repeats
 		if mixed {
 			processedTransactions.Add(transaction.AsSha256())
 		}
@@ -169,7 +170,7 @@ func distribute(destinationAddresses []string, amount string, startTime int64) (
 	}
 
 	// Generate (pseudo) random partitions to distribute the amount over the addresses
-	// One thing to note here is that it is possible to end up with an amount of 0.
+	// One thing to note here is that it IS possible to end up with an amount of 0 as a transaction
 	sum := 0.0
 	for j := 0; j < numBuckets; j++ {
 		randomNum := rand.Float64() * balance
@@ -178,6 +179,7 @@ func distribute(destinationAddresses []string, amount string, startTime int64) (
 	}
 	sort.Float64s(partitions)
 
+	// Use the partitions to allocate amounts for each transaction
 	for k, p := range partitions {
 		frac := p/sum
 		amounts[k] = frac*balance
@@ -195,19 +197,18 @@ func (mixerConfig *MixerConfig) mixToAddresses(destinationAddresses []string, am
 	if err != nil || len(amounts) != len(destinationAddresses) {
 		return false
 	}
-	fmt.Printf("amounts: %v \n", amounts)
 
 	// Current implementation distributes (random) amounts over the destination addresses -- one transaction per
 	// address given. However, there could be _more_ than one transaction per address destination which might be
 	// more secure. Good future feature.
 	for i, address := range destinationAddresses {
 		go func(destinationAddress string, amountToSend float64, executionTime time.Time) {
-			fmt.Printf("Create job for %s \n", destinationAddress)
 			job := func() error {
 				sendingAmount := fmt.Sprintf("%f", amountToSend)
-				fmt.Printf("Sending %s from %s to %s \n", sendingAmount, mixerConfig.houseAddress, destinationAddress)
 				status, err := mixerConfig.api.SendCoin(mixerConfig.houseAddress, destinationAddress, sendingAmount)
-				fmt.Printf("%s from %s with error %s \n", status, destinationAddress, err)
+				if status != "200 OK" {
+					fmt.Printf("Issue mixing: %s", status)
+				}
 				return err
 			}
 			mixerConfig.dispatcher.AddJob(destinationAddress, job, executionTime)
