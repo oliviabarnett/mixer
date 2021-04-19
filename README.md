@@ -6,8 +6,9 @@
 
 ## How to run:
 
-1. `make all`
-2. `./bin/mixer`
+1. `go mod vendor`
+2. `make all`
+3. `./bin/mixer`
 
 ## TODOS
 Please see comments in the code where I note potential issues/assumptions I made/future enhancements that could be made. The mixer service I created is running locally for the time being. I tried to break the problem up into chunks that lend themselves to containerization -- the mixer service, the client service, the dispatcher, etc. As of right now, I have no external storage system/database set up. The data saved during mixing dies along with the mixer service.
