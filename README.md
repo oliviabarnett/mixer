@@ -8,3 +8,10 @@
 
 1. `make all`
 2. `./bin/mixer`
+
+## TODOS
+Please see comments in the code where I note potential issues/assumptions I made/future enhancements that could be made
+
+## Tests
+
+I provided three testing files `clientlib/lib_test.go`, `mixerlib/lib_test.go` `internal/dispatcher_test.go` for test coverage of some of the major functions used
